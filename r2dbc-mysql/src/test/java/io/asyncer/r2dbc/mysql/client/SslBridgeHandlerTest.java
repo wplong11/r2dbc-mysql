@@ -24,6 +24,7 @@ import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.channel.unix.DomainSocketAddress;
 import io.netty.handler.ssl.SslHandler;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -56,8 +57,8 @@ class SslBridgeHandlerTest {
     @EnumSource(value = SslMode.class,
         names = { "PREFERRED", "REQUIRED", "VERIFY_CA", "VERIFY_IDENTITY", "TUNNEL" })
     void sendsSniForInetSocketAddress(SslMode mode) {
-        EmbeddedChannel channel = new RemoteAddressChannel(InetSocketAddress.createUnresolved(HOST, PORT));
-        SslHandler sslHandler = bridge(channel, mode);
+        EmbeddedChannel channel = new EmbeddedChannel();
+        SslHandler sslHandler = bridge(channel, mode, InetSocketAddress.createUnresolved(HOST, PORT));
 
         assertThat(sslHandler.engine().getPeerHost()).isEqualTo(HOST);
         assertThat(sslHandler.engine().getPeerPort()).isEqualTo(PORT);
@@ -79,7 +80,7 @@ class SslBridgeHandlerTest {
     @Test
     void omitsSniForNonInetSocketAddress() {
         EmbeddedChannel channel = new EmbeddedChannel();
-        SslHandler sslHandler = bridge(channel, SslMode.REQUIRED);
+        SslHandler sslHandler = bridge(channel, SslMode.REQUIRED, new DomainSocketAddress("/tmp/mysql.sock"));
 
         assertThat(sslHandler.engine().getPeerHost()).isNull();
         assertThat(sslHandler.engine().getSSLParameters().getServerNames()).isNullOrEmpty();
@@ -87,9 +88,9 @@ class SslBridgeHandlerTest {
         finish(channel);
     }
 
-    private static SslHandler bridge(EmbeddedChannel channel, SslMode mode) {
-        channel.pipeline().addLast(SslBridgeHandler.NAME,
-            new SslBridgeHandler(ConnectionContextTest.mock(), MySqlConnectionConfigurationTest.newSsl(mode)));
+    private static SslHandler bridge(EmbeddedChannel channel, SslMode mode, SocketAddress address) {
+        channel.pipeline().addLast(SslBridgeHandler.NAME, new SslBridgeHandler(ConnectionContextTest.mock(),
+            MySqlConnectionConfigurationTest.newSsl(mode), address));
 
         if (mode != SslMode.TUNNEL) {
             // TUNNEL bridges on handlerAdded, other modes bridge after the server accepts SSL.
@@ -118,22 +119,5 @@ class SslBridgeHandlerTest {
         }
 
         return outbound;
-    }
-
-    /**
-     * An {@link EmbeddedChannel} that reports a fixed remote address, like a connected TCP channel does.
-     */
-    private static final class RemoteAddressChannel extends EmbeddedChannel {
-
-        private final SocketAddress remoteAddress;
-
-        private RemoteAddressChannel(SocketAddress remoteAddress) {
-            this.remoteAddress = remoteAddress;
-        }
-
-        @Override
-        protected SocketAddress remoteAddress0() {
-            return remoteAddress;
-        }
     }
 }

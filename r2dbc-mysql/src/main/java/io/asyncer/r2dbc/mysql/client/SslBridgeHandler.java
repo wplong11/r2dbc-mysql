@@ -22,6 +22,7 @@ import io.asyncer.r2dbc.mysql.ServerVersion;
 import io.asyncer.r2dbc.mysql.constant.SslMode;
 import io.asyncer.r2dbc.mysql.constant.TlsVersions;
 import io.asyncer.r2dbc.mysql.message.server.SyntheticSslResponseMessage;
+import io.netty.buffer.ByteBufAllocator;
 import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.ssl.IdentityCipherSuiteFilter;
@@ -86,11 +87,18 @@ final class SslBridgeHandler extends ChannelDuplexHandler {
 
     private final MySqlSslConfiguration ssl;
 
+    /**
+     * The remote address that was configured by the user, which is what the SNI extension should carry. The
+     * channel's remote address is the resolved one and may have lost the host name, depending on the resolver.
+     */
+    private final SocketAddress address;
+
     private SSLEngine sslEngine;
 
-    SslBridgeHandler(ConnectionContext context, MySqlSslConfiguration ssl) {
+    SslBridgeHandler(ConnectionContext context, MySqlSslConfiguration ssl, SocketAddress address) {
         this.context = requireNonNull(context, "context must not be null");
         this.ssl = requireNonNull(ssl, "ssl must not be null");
+        this.address = requireNonNull(address, "address must not be null");
     }
 
     @Override
@@ -163,7 +171,7 @@ final class SslBridgeHandler extends ChannelDuplexHandler {
                 } catch (SSLException e) {
                     throw Exceptions.propagate(e);
                 }
-                SslHandler sslHandler = newSslHandler(sslProvider.getSslContext(), ctx);
+                SslHandler sslHandler = newSslHandler(sslProvider.getSslContext(), ctx.alloc());
 
                 this.sslEngine = sslHandler.engine();
 
@@ -184,19 +192,17 @@ final class SslBridgeHandler extends ChannelDuplexHandler {
         return verifier == null ? DefaultHostnameVerifier.INSTANCE : verifier;
     }
 
-    private static SslHandler newSslHandler(SslContext sslContext, ChannelHandlerContext ctx) {
-        SocketAddress remoteAddress = ctx.channel().remoteAddress();
-
-        if (remoteAddress instanceof InetSocketAddress) {
+    private SslHandler newSslHandler(SslContext sslContext, ByteBufAllocator alloc) {
+        if (address instanceof InetSocketAddress) {
             // Pass the peer host and port so that the SSLEngine sends the server_name (SNI) extension in
             // the ClientHello, same as reactor-netty's SslProvider#addSslHandler does. It does not enable
             // endpoint identification, hostname is still checked manually in handleSslCompleted.
-            InetSocketAddress address = (InetSocketAddress) remoteAddress;
+            InetSocketAddress inetAddress = (InetSocketAddress) address;
 
-            return sslContext.newHandler(ctx.alloc(), address.getHostString(), address.getPort());
+            return sslContext.newHandler(alloc, inetAddress.getHostString(), inetAddress.getPort());
         }
 
-        return sslContext.newHandler(ctx.alloc());
+        return sslContext.newHandler(alloc);
     }
 
     private static boolean isTls13Enabled(ConnectionContext context) {
