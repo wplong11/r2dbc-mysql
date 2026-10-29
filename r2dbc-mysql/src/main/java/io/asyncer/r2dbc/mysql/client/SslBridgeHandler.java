@@ -42,6 +42,7 @@ import javax.net.ssl.SSLEngine;
 import javax.net.ssl.SSLException;
 import java.io.File;
 import java.net.InetSocketAddress;
+import java.net.SocketAddress;
 
 import static io.asyncer.r2dbc.mysql.internal.util.AssertUtils.requireNonNull;
 import static io.netty.handler.ssl.SslProvider.JDK;
@@ -162,7 +163,7 @@ final class SslBridgeHandler extends ChannelDuplexHandler {
                 } catch (SSLException e) {
                     throw Exceptions.propagate(e);
                 }
-                SslHandler sslHandler = sslProvider.getSslContext().newHandler(ctx.alloc());
+                SslHandler sslHandler = newSslHandler(sslProvider.getSslContext(), ctx);
 
                 this.sslEngine = sslHandler.engine();
 
@@ -181,6 +182,21 @@ final class SslBridgeHandler extends ChannelDuplexHandler {
     private HostnameVerifier hostnameVerifier() {
         HostnameVerifier verifier = ssl.getSslHostnameVerifier();
         return verifier == null ? DefaultHostnameVerifier.INSTANCE : verifier;
+    }
+
+    private static SslHandler newSslHandler(SslContext sslContext, ChannelHandlerContext ctx) {
+        SocketAddress remoteAddress = ctx.channel().remoteAddress();
+
+        if (remoteAddress instanceof InetSocketAddress) {
+            // Pass the peer host and port so that the SSLEngine sends the server_name (SNI) extension in
+            // the ClientHello, same as reactor-netty's SslProvider#addSslHandler does. It does not enable
+            // endpoint identification, hostname is still checked manually in handleSslCompleted.
+            InetSocketAddress address = (InetSocketAddress) remoteAddress;
+
+            return sslContext.newHandler(ctx.alloc(), address.getHostString(), address.getPort());
+        }
+
+        return sslContext.newHandler(ctx.alloc());
     }
 
     private static boolean isTls13Enabled(ConnectionContext context) {
