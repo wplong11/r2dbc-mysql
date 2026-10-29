@@ -21,19 +21,21 @@ import io.asyncer.r2dbc.mysql.MySqlConnectionConfigurationTest;
 import io.asyncer.r2dbc.mysql.constant.SslMode;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
-import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
+import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.channel.unix.DomainSocketAddress;
+import io.netty.handler.ssl.AbstractSniHandler;
 import io.netty.handler.ssl.SslHandler;
+import io.netty.util.concurrent.Future;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 
-import javax.net.ssl.SNIHostName;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
-import java.nio.charset.StandardCharsets;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -60,19 +62,11 @@ class SslBridgeHandlerTest {
         EmbeddedChannel channel = new EmbeddedChannel();
         SslHandler sslHandler = bridge(channel, mode, InetSocketAddress.createUnresolved(HOST, PORT));
 
-        assertThat(sslHandler.engine().getPeerHost()).isEqualTo(HOST);
-        assertThat(sslHandler.engine().getPeerPort()).isEqualTo(PORT);
-        assertThat(sslHandler.engine().getSSLParameters().getServerNames())
-            .containsExactly(new SNIHostName(HOST));
-
-        // The ClientHello is written as soon as the SslHandler is added to an active channel, and the
-        // only place a plaintext hostname can appear in it is the server_name extension.
-        ByteBuf clientHello = readOutbound(channel);
         try {
-            assertThat(ByteBufUtil.indexOf(Unpooled.copiedBuffer(HOST, StandardCharsets.US_ASCII), clientHello))
-                .isNotNegative();
+            assertThat(sslHandler.engine().getPeerHost()).isEqualTo(HOST);
+            assertThat(sslHandler.engine().getPeerPort()).isEqualTo(PORT);
+            assertThat(sniOf(readOutbound(channel))).isEqualTo(HOST);
         } finally {
-            clientHello.release();
             finish(channel);
         }
     }
@@ -82,10 +76,12 @@ class SslBridgeHandlerTest {
         EmbeddedChannel channel = new EmbeddedChannel();
         SslHandler sslHandler = bridge(channel, SslMode.REQUIRED, new DomainSocketAddress("/tmp/mysql.sock"));
 
-        assertThat(sslHandler.engine().getPeerHost()).isNull();
-        assertThat(sslHandler.engine().getSSLParameters().getServerNames()).isNullOrEmpty();
-
-        finish(channel);
+        try {
+            assertThat(sslHandler.engine().getPeerHost()).isNull();
+            assertThat(sniOf(readOutbound(channel))).isNull();
+        } finally {
+            finish(channel);
+        }
     }
 
     private static SslHandler bridge(EmbeddedChannel channel, SslMode mode, SocketAddress address) {
@@ -110,6 +106,9 @@ class SslBridgeHandlerTest {
         channel.finishAndReleaseAll();
     }
 
+    /**
+     * Reads the ClientHello, which is written as soon as the {@link SslHandler} is added to an active channel.
+     */
     private static ByteBuf readOutbound(EmbeddedChannel channel) {
         ByteBuf outbound = Unpooled.buffer();
 
@@ -119,5 +118,37 @@ class SslBridgeHandlerTest {
         }
 
         return outbound;
+    }
+
+    /**
+     * Extracts the server_name extension from a ClientHello with Netty's own TLS parser, {@code null} if the
+     * ClientHello does not carry one. Takes ownership of {@code clientHello}.
+     */
+    private static String sniOf(ByteBuf clientHello) {
+        AtomicBoolean parsed = new AtomicBoolean();
+        AtomicReference<String> sni = new AtomicReference<>();
+        EmbeddedChannel server = new EmbeddedChannel(new AbstractSniHandler<Object>() {
+
+            @Override
+            protected Future<Object> lookup(ChannelHandlerContext ctx, String hostname) {
+                parsed.set(true);
+                sni.set(hostname);
+                return ctx.executor().newSucceededFuture(null);
+            }
+
+            @Override
+            protected void onLookupComplete(ChannelHandlerContext ctx, String hostname, Future<Object> future) {
+            }
+        });
+
+        try {
+            server.writeInbound(clientHello);
+
+            assertThat(parsed).as("ClientHello parsed").isTrue();
+
+            return sni.get();
+        } finally {
+            server.finishAndReleaseAll();
+        }
     }
 }
